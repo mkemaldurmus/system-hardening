@@ -47,25 +47,32 @@ if ! echo "$PATH" | grep -q "${HOME}/.local/bin"; then
 fi
 ok "memory-suite installed to ~/.local/bin/"
 
-# ── Step 5: Install stress-ng (optional, for full test suite) ──────────────
-step "Step 5/5: Installing stress-ng (optional, for full test suite)..."
-if command -v stress-ng &>/dev/null; then
-    ok "stress-ng already installed"
-else
-    sudo pacman -S --noconfirm stress-ng || echo "  (optional - skip if unavailable)"
-    ok "stress-ng installed"
-fi
+# ── Step 5: Install test dependencies (stress-ng, glmark2) ─────────────
+step "Step 5/5: Installing test dependencies..."
+for pkg in stress-ng glmark2; do
+    if command -v "$pkg" &>/dev/null; then
+        ok "$pkg already installed"
+    else
+        sudo pacman -S --noconfirm "$pkg" || echo "  (optional - skip if unavailable)"
+        ok "$pkg installed"
+    fi
+done
 
 # ── Verify ──────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${GREEN}═══ Hardening Complete ═══${NC}"
 echo ""
-echo "Installed protections:"
+echo "Installed protections & test suite:"
 echo "  1. earlyoom     — kills heaviest process at 85% RAM (prefers kwalletd6)"
 echo "  2. kwalletd6    — capped at 1 GiB via systemd MemoryMax"
 echo "  3. Watchdog     — KDE auto-restarts kwalletd6 after kill"
-echo "  4. memory-suite — regression test suite (~/.local/bin/memory-suite)"
+echo "  4. memory-suite — full stability suite (~/.local/bin/memory-suite)"
 echo ""
-echo "Verify:  memory-suite --quick"
-echo "Monitor: memory-suite --leak-monitor"
+echo "Test modes:"
+echo "  memory-suite --quick      Basic health (30s)"
+echo "  memory-suite --cpu        CPU stress & thermal (2min)"
+echo "  memory-suite --gpu        GPU/OpenGL stress (2min)"
+echo "  memory-suite --full       Memory only (2min)"
+echo "  memory-suite --burnin     Full system: Memory+CPU+GPU (6min)"
+echo "  memory-suite --leak-monitor  Continuous leak watch"
 echo ""

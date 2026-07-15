@@ -88,8 +88,17 @@ chmod +x ~/.local/bin/memory-suite
 # Quick health check (30s)
 memory-suite --quick
 
-# Full stress test + baseline (2 min)
+# CPU stress & thermal (2 min)
+memory-suite --cpu
+
+# GPU stress & OpenGL (2 min)
+memory-suite --gpu
+
+# Full memory tests + baseline (2 min)
 memory-suite --full
+
+# Complete system burn-in: Memory + CPU + GPU (6 min)
+memory-suite --burnin
 
 # Continuous leak monitoring (every 5 min)
 memory-suite --leak-monitor
@@ -103,20 +112,34 @@ systemctl --user show dbus-:1.2-org.kde.kwalletd6@*.service -p MemoryMax
 | Command | Purpose |
 |---|---|
 | `memory-suite --quick` | Daily health check |
+| `memory-suite --cpu` | After BIOS/CPU microcode updates |
+| `memory-suite --gpu` | After GPU driver/Mesa updates |
 | `memory-suite --full` | After kernel/systemd/KDE updates |
+| `memory-suite --burnin` | Full system validation before deployment |
 | `journalctl -u earlyoom` | Check if earlyoom killed anything |
 | `journalctl -k \| grep oom` | Check kernel OOM events |
 | `systemctl --user status kwalletd6-watchdog` | Verify watchdog is running |
 
 ## Test Results (2026-07-15)
 
-- **18/18 checks passed** (full suite)
+### Memory — 18/18 passed
 - systemd MemoryMax enforcement: VERIFIED (cgroup OOM kills at 10M limit)
 - earlyoom health + config: VERIFIED
-- kwalletd6 leak contained: VERIFIED (hit 1 GiB limit, killed, restarted — system stable)
+- kwalletd6 leak contained: VERIFIED (hit 1 GiB limit, killed, restarted)
 - Memory pressure recovery: VERIFIED (2 GiB allocated, fully reclaimed)
 - Swap pressure handling: VERIFIED
-- Concurrent CPU+memory stress: VERIFIED (system responsive throughout)
+- Concurrent CPU+memory stress: VERIFIED
+
+### CPU — 5/5 passed (Ryzen 5 7520U, 4C/8T)
+- Single-core boost: 3.8 GHz, 94°C → 97°C
+- All-core stress: 97°C peak (thermal warning — laptop cooling limit)
+- Cache thrashing: memory stable throughout
+- FPU (FFT + matrix): 20s sustained, no throttle
+
+### GPU — 4/4 passed (AMD Radeon 610M iGPU)
+- OpenGL (glmark2): 30s sustained
+- GPU shader (stress-ng): 89°C baseline
+- GPU+CPU concurrent: 89°C → 97°C peak, system stable (no crash, no OOM)
 
 ## References
 
