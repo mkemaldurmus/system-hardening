@@ -47,8 +47,34 @@ if ! echo "$PATH" | grep -q "${HOME}/.local/bin"; then
 fi
 ok "memory-suite installed to ~/.local/bin/"
 
+# ── Step 6: CPU Performance Optimizations ──────────────────────────────────
+step "Step 6/6: Applying CPU performance optimizations..."
+
+# 6a: Sysctl tweaks (I/O, network, scheduler)
+sudo cp "$REPO_DIR/configs/sysctl/99-ryzen-perf.conf" /etc/sysctl.d/
+sudo sysctl --system >/dev/null 2>&1
+ok "Sysctl performance tweaks applied"
+
+# 6b: thermald with AMD override
+sudo pacman -S --noconfirm thermald 2>/dev/null || true
+sudo mkdir -p /etc/systemd/system/thermald.service.d
+sudo cp "$REPO_DIR/configs/thermald/amd-override.conf" /etc/systemd/system/thermald.service.d/
+sudo cp "$REPO_DIR/configs/thermald/thermal-conf.xml" /etc/thermald/
+sudo systemctl daemon-reload
+sudo systemctl enable --now thermald
+ok "thermald configured for AMD with RAPL thermal management"
+
+# 6c: Kernel mitigations=off (requires reboot)
+if ! grep -q "mitigations=off" /etc/default/limine 2>/dev/null; then
+    echo ""
+    echo "  ⚠ To disable CPU mitigations (5-15% performance gain), add to kernel cmdline:"
+    echo "    mitigations=off"
+    echo "  Edit /etc/default/limine and run: sudo limine-update"
+fi
+ok "CPU optimizations complete (mitigations=off requires manual reboot)"
+
 # ── Step 5: Install test dependencies (stress-ng, glmark2) ─────────────
-step "Step 5/5: Installing test dependencies..."
+step "Step 5/6: Installing test dependencies..."
 for pkg in stress-ng glmark2; do
     if command -v "$pkg" &>/dev/null; then
         ok "$pkg already installed"
@@ -62,11 +88,13 @@ done
 echo ""
 echo -e "${GREEN}═══ Hardening Complete ═══${NC}"
 echo ""
-echo "Installed protections & test suite:"
+echo "Installed protections & optimizations:"
 echo "  1. earlyoom     — kills heaviest process at 85% RAM (prefers kwalletd6)"
 echo "  2. kwalletd6    — capped at 1 GiB via systemd MemoryMax"
 echo "  3. Watchdog     — KDE auto-restarts kwalletd6 after kill"
-echo "  4. memory-suite — full stability suite (~/.local/bin/memory-suite)"
+echo "  4. Sysctl       — I/O, network, scheduler performance tweaks"
+echo "  5. thermald     — AMD RAPL-based adaptive thermal management"
+echo "  6. memory-suite — full stability suite (~/.local/bin/memory-suite)"
 echo ""
 echo "Test modes:"
 echo "  memory-suite --quick      Basic health (30s)"
