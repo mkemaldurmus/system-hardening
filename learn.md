@@ -97,21 +97,25 @@ Bizim config'de `kernel.sched_migration_cost_ns` ve `kernel.sched_autogroup_enab
 Couldn't write '500000' to 'kernel/sched_migration_cost_ns', ignoring: No such file or directory
 ```
 
-**Neden 3 — Samba/CIFS veya baska bir servis sonradan degistiriyor olabilir:**
-Kesin kanit yok ama deger 80 (ne 10, ne 50, ne 100, ne de kernel default 60). 80'in kaynagi bulunamadi.
+**Neden 3 — CachyOS kernel compiled-in default = 80:**
+Ana hat kernel default 60 degil, CachyOS kernel'in icinde `CONFIG_DEFAULT_VM_SWAPPINESS=80` olarak derlenmis. Boot aninda kernel 80 ile basliyor. systemd-sysctl override etmeye calisiyor ama `/usr/lib/sysctl.d/70-cachyos-settings.conf` (swappiness=100) boot sirasinda bizim `/etc/sysctl.d/99-ryzen-perf.conf`'u bilinmeyen bir sebepten override ediyor. (Manuel `sysctl --system` dogru calisiyor ama boot'ta farkli bir sira olabilir.)
 
-### Cozum
+### Cozum (2 asamali)
 1. `99-ryzen-perf.conf`'dan EEVDF'de olmayan `kernel.sched_migration_cost_ns` ve `kernel.sched_autogroup_enabled` kaldirildi
-2. `99-cachyos-memory.conf` → `99-cachyos-memory.conf.bak` yapildi (sadece swappiness=50 iceriyordu)
-3. Config dosyasi: `/etc/sysctl.d/99-ryzen-perf.conf`
-4. Repo kopyasi: `~/system-hardening/configs/sysctl/99-ryzen-perf.conf`
+2. `99-cachyos-memory.conf` → `99-cachyos-memory.conf.bak` yapildi
+3. **Kritik fix**: `/etc/sysctl.d/70-cachyos-settings.conf` olusturuldu — `/usr/lib/sysctl.d/70-cachyos-settings.conf`'u OVRIDE eden bos dosya. systemd ayni isimli dosyada /etc versiyonunu /usr/lib versiyonuna tercih eder. Bu sayede swappiness=100 tamamen bloke edilir, sadece 99-ryzen-perf.conf'taki swappiness=10 gecerli olur.
+4. Config dosyalari:
+   - `/etc/sysctl.d/99-ryzen-perf.conf`
+   - `/etc/sysctl.d/70-cachyos-settings.conf` (override)
+5. Repo kopyalari: `configs/sysctl/99-ryzen-perf.conf`, `configs/sysctl/70-cachyos-override.conf`
 
 ### Dogrulama
 ```bash
 cat /proc/sys/vm/swappiness
 # 10 ✅
-sysctl vm.swappiness
-# vm.swappiness = 10 ✅
+# Override aktif mi?
+grep -r "swappiness" /etc/sysctl.d/ /usr/lib/sysctl.d/ | grep -v ".bak"
+# Sadece 99-ryzen-perf.conf swappiness=10 cikmali ✅
 ```
 
 ---
