@@ -50,10 +50,16 @@ ok "memory-suite installed to ~/.local/bin/"
 # ── Step 6: CPU Performance Optimizations ──────────────────────────────────
 step "Step 6/7: Applying CPU performance optimizations..."
 
-# 6a: Sysctl tweaks (I/O, network, scheduler)
+# 6a: Resolve CachyOS sysctl conflict
+if [ -f /etc/sysctl.d/99-cachyos-memory.conf ]; then
+    sudo mv /etc/sysctl.d/99-cachyos-memory.conf /etc/sysctl.d/99-cachyos-memory.conf.bak
+    ok "Disabled conflicting 99-cachyos-memory.conf (swappiness conflict)"
+fi
+
+# 6b: Sysctl tweaks (I/O, network, scheduler) - EEVDF uyumlu
 sudo cp "$REPO_DIR/configs/sysctl/99-ryzen-perf.conf" /etc/sysctl.d/
 sudo sysctl --system >/dev/null 2>&1
-ok "Sysctl performance tweaks applied"
+ok "Sysctl performance tweaks applied (EEVDF kernel uyumlu)"
 
 # 6b: thermald with AMD override
 sudo pacman -S --noconfirm thermald 2>/dev/null || true
