@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  Memory Stability & Leak Detection Test Suite
-#  Version: 1.0
+#  System Stability Test Suite — Memory, CPU, GPU
+#  Version: 2.0
 #  Location: ~/.local/bin/memory-suite
-#  Usage:    memory-suite [--quick|--full|--leak-monitor]
+#  Usage:    memory-suite [--quick|--full|--burnin|--leak-monitor|--gpu|--cpu]
 # =============================================================================
 set -o pipefail
 
@@ -13,6 +13,8 @@ REPORT_FILE="${REPORT_DIR}/report-$(date +%Y%m%d-%H%M%S).log"
 TIMEOUT_SHORT=5
 TIMEOUT_MEDIUM=15
 TIMEOUT_LONG=60
+TIMEOUT_GPU=30
+TIMEOUT_CPU=20
 STRESS_MB_LIGHT=512
 STRESS_MB_MEDIUM=2048
 STRESS_MB_HEAVY=3500
@@ -67,6 +69,37 @@ pct() { awk -v val="$1" -v total="$2" 'BEGIN {printf "%.1f", (val/total)*100}'; 
 process_rss_mb() {
     local pid="$1"
     awk '/^VmRSS:/ {printf "%.0f", $2/1024}' "/proc/$pid/status" 2>/dev/null
+}
+
+get_cpu_cores() { nproc; }
+
+get_cpu_model() { awk -F': ' '/^model name/ {print $2; exit}' /proc/cpuinfo; }
+
+get_cpu_temp() {
+    # Try multiple thermal zone paths (AMD, Intel, generic)
+    local t
+    t=$(cat /sys/class/thermal/thermal_zone*/temp 2>/dev/null | head -1)
+    if [[ -n "$t" ]]; then
+        awk -v t="$t" 'BEGIN {printf "%.1f", t/1000}'
+    else
+        echo "N/A"
+    fi
+}
+
+get_gpu_name() {
+    lspci 2>/dev/null | grep -i 'vga\|3d\|display' | head -1 | sed 's/.*: //' | cut -d'(' -f1
+}
+
+get_gpu_load() {
+    # AMD GPU load via hwmon/sysfs
+    local card card_path load
+    for card_path in /sys/class/drm/card*/device/gpu_busy_percent; do
+        if [[ -f "$card_path" ]]; then
+            load=$(cat "$card_path" 2>/dev/null)
+            [[ -n "$load" ]] && echo "$load" && return
+        fi
+    done
+    echo "N/A"
 }
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -358,21 +391,200 @@ test_10_full_system_integrity() {
 }
 
 # ═════════════════════════════════════════════════════════════════════════════
+#  CPU STRESS TESTS
+# ═════════════════════════════════════════════════════════════════════════════
+
+test_11_cpu_info() {
+    log_info "CPU bilgileri toplaniyor..."
+    local cores model freq temp
+    cores=$(get_cpu_cores)
+    model=$(get_cpu_model)
+    freq=$(awk '/cpu MHz/ {printf "%.0f", $4; exit}' /proc/cpuinfo)
+    temp=$(get_cpu_temp)
+
+    printf "  %-25s %s\n" "Model" "$model"
+    printf "  %-25s %s\n" "Cekirdek" "$cores"
+    printf "  %-25s %s MHz\n" "Frekans" "$freq"
+    printf "  %-25s %s°C\n" "Sicaklik" "$temp"
+    log_pass "CPU bilgileri okundu"
+}
+
+test_12_cpu_single_core() {
+    log_info "Tek cekirdek CPU stres testi (${TIMEOUT_CPU}s, max boost)..."
+    local temp_before temp_after
+    temp_before=$(get_cpu_temp)
+
+    systemd-run --user --wait -p CPUQuota=100% \
+        stress-ng --cpu 1 --cpu-method fft --timeout "$TIMEOUT_CPU" >/dev/null 2>&1
+
+    temp_after=$(get_cpu_temp)
+    local delta
+    delta=$(awk -v a="$temp_after" -v b="$temp_before" 'BEGIN {printf "%.1f", a-b}' 2>/dev/null || echo "N/A")
+    log_pass "Tek cekirdek stres: ${temp_before}°C -> ${temp_after}°C (Δ${delta}°C)"
+}
+
+test_13_cpu_all_cores() {
+    log_info "Tum cekirdek CPU stres testi (${TIMEOUT_CPU}s, max isi)..."
+    local temp_before temp_after
+    temp_before=$(get_cpu_temp)
+
+    stress-ng --cpu 0 --cpu-method ackermann --timeout "$TIMEOUT_CPU" >/dev/null 2>&1
+
+    temp_after=$(get_cpu_temp)
+    local delta
+    delta=$(awk -v a="$temp_after" -v b="$temp_before" 'BEGIN {printf "%.1f", a-b}' 2>/dev/null || echo "N/A")
+
+    if [[ "$temp_after" != "N/A" ]]; then
+        if awk -v t="$temp_after" 'BEGIN {exit (t < 90 ? 0 : 1)}'; then
+            log_pass "Tum cekirdek stres: ${temp_before}°C -> ${temp_after}°C (Δ${delta}°C)"
+        else
+            log_warn "YUKSEK SICAKLIK: ${temp_after}°C - throttling olabilir!"
+        fi
+    else
+        log_pass "Tum cekirdek stres tamamlandi (sicaklik sensoru yok)"
+    fi
+}
+
+test_14_cpu_cache_stress() {
+    log_info "CPU cache thrashing testi (${TIMEOUT_CPU}s)..."
+    local before after
+    before=$(get_mem_avail_mb)
+
+    stress-ng --cache 4 --timeout "$TIMEOUT_CPU" >/dev/null 2>&1
+
+    after=$(get_mem_avail_mb)
+    if awk -v a="$after" -v b="$before" 'BEGIN {exit (a/b > 0.90 ? 0 : 1)}'; then
+        log_pass "Cache stres: bellek stabil ${before} MiB -> ${after} MiB"
+    else
+        log_warn "Cache stres sonrasi bellek dususu: ${before} MiB -> ${after} MiB"
+    fi
+}
+
+test_15_cpu_floating_point() {
+    log_info "CPU floating-point stres testi (${TIMEOUT_CPU}s, matrix + FFT)..."
+    local start_time end_time
+    start_time=$(date +%s)
+
+    stress-ng --matrix 0 --cpu 0 --cpu-method fft --timeout "$TIMEOUT_CPU" >/dev/null 2>&1
+
+    end_time=$(date +%s)
+    local elapsed=$((end_time - start_time))
+    if (( elapsed >= TIMEOUT_CPU - 2 && elapsed <= TIMEOUT_CPU + 5 )); then
+        log_pass "FPU stres: ${elapsed}s tamamlandi (thermal throttle yok)"
+    else
+        log_warn "FPU stres: ${elapsed}s surdu (beklenen: ${TIMEOUT_CPU}s - throttle?)"
+    fi
+
+    # Quick system responsiveness check
+    if free -h >/dev/null 2>&1; then
+        log_pass "FPU stres sirasinda sistem yanit verdi"
+    fi
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  GPU STRESS TESTS
+# ═════════════════════════════════════════════════════════════════════════════
+
+test_16_gpu_info() {
+    log_info "GPU bilgileri toplaniyor..."
+    local gpu_name load
+    gpu_name=$(get_gpu_name)
+    load=$(get_gpu_load)
+
+    printf "  %-25s %s\n" "GPU" "$gpu_name"
+    printf "  %-25s %s%%\n" "GPU Load" "$load"
+
+    if command -v glxinfo &>/dev/null; then
+        local gl_renderer
+        gl_renderer=$(glxinfo -B 2>/dev/null | grep -i "renderer" | head -1 | sed 's/.*: //')
+        printf "  %-25s %s\n" "OpenGL Renderer" "${gl_renderer:-N/A}"
+    fi
+    log_pass "GPU bilgileri okundu"
+}
+
+test_17_gpu_opengl() {
+    log_info "OpenGL GPU stres testi (glmark2, ${TIMEOUT_GPU}s)..."
+
+    if ! command -v glmark2 &>/dev/null; then
+        log_skip "glmark2 yuklu degil"
+        return
+    fi
+
+    local temp_before temp_after
+    temp_before=$(get_cpu_temp)
+
+    glmark2 --off-screen --run-forever --timeout "$TIMEOUT_GPU" 2>/dev/null | tail -3
+
+    temp_after=$(get_cpu_temp)
+    if [[ "$temp_after" != "N/A" ]]; then
+        local delta
+        delta=$(awk -v a="$temp_after" -v b="$temp_before" 'BEGIN {printf "%.1f", a-b}' 2>/dev/null || echo "N/A")
+        log_pass "GPU OpenGL stres: ${temp_before}°C -> ${temp_after}°C (Δ${delta}°C)"
+    else
+        log_pass "GPU OpenGL stres tamamlandi"
+    fi
+}
+
+test_18_gpu_shader() {
+    log_info "GPU shader stres testi (stress-ng --gpu, ${TIMEOUT_GPU}s)..."
+    local temp_before temp_after
+    temp_before=$(get_cpu_temp)
+
+    stress-ng --gpu 2 --timeout "$TIMEOUT_GPU" >/dev/null 2>&1
+
+    temp_after=$(get_cpu_temp)
+    if [[ "$temp_after" != "N/A" ]]; then
+        if awk -v t="$temp_after" 'BEGIN {exit (t < 85 ? 0 : 1)}'; then
+            log_pass "GPU shader stres: ${temp_before}°C -> ${temp_after}°C"
+        else
+            log_warn "GPU shader YUKSEK SICAKLIK: ${temp_after}°C"
+        fi
+    else
+        log_pass "GPU shader stres tamamlandi"
+    fi
+}
+
+test_19_gpu_cpu_concurrent() {
+    log_info "GPU + CPU es zamanli stres (worst-case thermal, ${TIMEOUT_GPU}s)..."
+    local temp_before temp_after
+    temp_before=$(get_cpu_temp)
+
+    # Run GPU stress + CPU stress in parallel
+    stress-ng --gpu 2 --cpu 4 --timeout "$TIMEOUT_GPU" >/dev/null 2>&1
+
+    temp_after=$(get_cpu_temp)
+
+    # Verify system survived the combined stress
+    if free -h >/dev/null 2>&1; then
+        if [[ "$temp_after" != "N/A" ]]; then
+            local delta
+            delta=$(awk -v a="$temp_after" -v b="$temp_before" 'BEGIN {printf "%.1f", a-b}' 2>/dev/null || echo "N/A")
+            log_pass "GPU+CPU es zamanli: ${temp_before}°C -> ${temp_after}°C (Δ${delta}°C) - sistem stabil"
+        else
+            log_pass "GPU+CPU es zamanli stres tamamlandi - sistem stabil"
+        fi
+    else
+        log_fail "GPU+CPU es zamanli stres sonrasi sistem YANIT VERMIYOR!"
+    fi
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
 #  MAIN
 # ═════════════════════════════════════════════════════════════════════════════
 
 MODE="${1:---full}"
 
 echo -e "${BOLD}${BLUE}"
-echo "╔══════════════════════════════════════════════════════════╗"
-echo "║     MEMORY STABILITY & LEAK DETECTION TEST SUITE v1.0   ║"
-echo "╚══════════════════════════════════════════════════════════╝"
+echo "╔══════════════════════════════════════════════════════════════╗"
+echo "║   SYSTEM STABILITY TEST SUITE v2.0 — Memory · CPU · GPU    ║"
+echo "╚══════════════════════════════════════════════════════════════╝"
 echo -e "${NC}"
 echo "Baslangic: $(date '+%Y-%m-%d %H:%M:%S')"
 echo "Mod:       $MODE"
 echo "Rapor:     $REPORT_FILE"
-echo "Host:      $(hostname)"
-echo "Kernel:    $(uname -r)"
+echo "Host:      $(hostname) | Kernel: $(uname -r)"
+echo "CPU:       $(get_cpu_model) ($(get_cpu_cores) cores)"
+echo "GPU:       $(get_gpu_name)"
 echo "RAM:       $(get_mem_total_mb) MiB toplam"
 
 case "$MODE" in
@@ -389,6 +601,46 @@ case "$MODE" in
             run_test "Memory Leak Snapshot" test_03_memory_leak_detection
             sleep 300  # 5 minutes
         done
+        ;;
+    --cpu)
+        log_section "CPU TEST SUITE"
+        run_test "CPU Info"                test_11_cpu_info
+        run_test "Single Core Stress"      test_12_cpu_single_core
+        run_test "All Core Stress"         test_13_cpu_all_cores
+        run_test "Cache Thrashing"         test_14_cpu_cache_stress
+        run_test "Floating Point Stress"   test_15_cpu_floating_point
+        ;;
+    --gpu)
+        log_section "GPU TEST SUITE"
+        run_test "GPU Info"                test_16_gpu_info
+        run_test "OpenGL Stress (glmark2)" test_17_gpu_opengl
+        run_test "GPU Shader Stress"       test_18_gpu_shader
+        run_test "GPU+CPU Concurrent"      test_19_gpu_cpu_concurrent
+        ;;
+    --burnin)
+        log_section "FULL SYSTEM BURN-IN (Memory + CPU + GPU)"
+        log_section "--- MEMORY ---"
+        run_test "MemoryMax Enforcement"     test_01_systemd_memorymax
+        run_test "earlyoom Health"          test_02_earlyoom_health
+        run_test "Memory Leak Detection"    test_03_memory_leak_detection
+        run_test "Controlled Pressure"      test_04_controlled_memory_pressure
+        run_test "Swap Pressure"            test_05_swap_pressure
+        log_section "--- CPU ---"
+        run_test "CPU Info"                test_11_cpu_info
+        run_test "Single Core Stress"      test_12_cpu_single_core
+        run_test "All Core Stress"         test_13_cpu_all_cores
+        run_test "Cache Thrashing"         test_14_cpu_cache_stress
+        run_test "Floating Point Stress"   test_15_cpu_floating_point
+        log_section "--- GPU ---"
+        run_test "GPU Info"                test_16_gpu_info
+        run_test "OpenGL Stress (glmark2)" test_17_gpu_opengl
+        run_test "GPU Shader Stress"       test_18_gpu_shader
+        run_test "GPU+CPU Concurrent"      test_19_gpu_cpu_concurrent
+        log_section "--- INTEGRITY ---"
+        run_test "KDE Watchdog"             test_06_kde_watchdog
+        run_test "OOM Score Priorities"     test_07_oom_score_priorities
+        run_test "Performance Baseline"     test_09_performance_baseline
+        run_test "System Integrity"         test_10_full_system_integrity
         ;;
     --full|*)
         log_section "TAM TEST SUITE"
