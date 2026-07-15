@@ -1,0 +1,50 @@
+[1m[0;34m
+╔══════════════════════════════════════════════════════════╗
+║     MEMORY STABILITY & LEAK DETECTION TEST SUITE v1.0   ║
+╚══════════════════════════════════════════════════════════╝
+[0m
+Baslangic: 2026-07-15 14:36:52
+Mod:       --quick
+Rapor:     /home/kemal/.cache/memory-suite/report-20260715-143652.log
+Host:      kemal
+Kernel:    7.1.3-2-cachyos
+RAM:       14797 MiB toplam
+
+[1m[0;34m═══ HIZLI TEST (temel kontroller) ═══[0m
+
+[1m[1][0m MemoryMax Enforcement
+──────────────────────────────────────────────
+  [0;36m→[0m systemd MemoryMax: kwalletd6'da 1 GiB limit uygulandi mi?
+  [0;32m✓ PASS[0m  kwalletd6 MemoryMax = 1 GiB (1073741824 bytes)
+  [0;36m→[0m systemd MemoryMax: limit gercekten calisiyor mu?
+  [0;32m✓ PASS[0m  Cgroup OOM: 10M limitli servis 100M tahsis edemedi -> Result=oom-kill
+
+[1m[2][0m earlyoom Health
+──────────────────────────────────────────────
+  [0;36m→[0m earlyoom servis durumu kontrol ediliyor...
+  [0;32m✓ PASS[0m  earlyoom aktif | 6812 MiB bos / 14797 MiB toplam = 46.0%
+  [0;36m→[0m earlyoom konfigurasyonu dogru mu?
+  [0;32m✓ PASS[0m  Config: kwalletd6 oncelikli, 15% RAM threshold
+  [0;36m→[0m earlyoom threshold altinda mi? (%%15 = tetiklenme esigi)
+  [0;32m✓ PASS[0m  RAM 46.0% bos -> threshold'un UZERINDE (guvenli)
+
+[1m[3][0m Memory Leak Detection
+──────────────────────────────────────────────
+  [0;36m→[0m kwalletd6 kisa sureli bellek buyumesi analiz ediliyor...
+  [0;36m→[0m Baslangic RSS: 101 MiB
+  [0;32m✓ PASS[0m  kwalletd6 stabil: +2 MiB / 3sn (normal)
+  [0;36m→[0m kwalletd6 MemoryMax limiti altinda mi?
+  [0;32m✓ PASS[0m  Kullanim: 103 MiB / 1024 MiB limit (10.1%)
+
+[1m[4][0m System Integrity
+──────────────────────────────────────────────
+  [0;36m→[0m Sistem butunluk kontrolu...
+  [0;32m✓ PASS[0m  Zombie proses yok
+  [0;32m✓ PASS[0m  Kernel OOM olayi yok
+  [0;32m✓ PASS[0m  kswapd0 CPU: 1.6% (normal)
+  [0;32m✓ PASS[0m  earlyoom gereksiz yere proses oldurmedi
+
+[1m[0;34m═══ TEST SONUCLARI ═══[0m
+  [0;32mPASS:[0m 11  [0;31mFAIL:[0m 0  [1;33mSKIP:[0m 0  TOTAL: 4
+
+[0;32m[1m✓ TUM TESTLER BASARILI[0m

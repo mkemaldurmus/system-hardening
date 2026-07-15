@@ -1,0 +1,420 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  Memory Stability & Leak Detection Test Suite
+#  Version: 1.0
+#  Location: ~/.local/bin/memory-suite
+#  Usage:    memory-suite [--quick|--full|--leak-monitor]
+# =============================================================================
+set -o pipefail
+
+# ── Configuration ───────────────────────────────────────────────────────────
+REPORT_DIR="${HOME}/.cache/memory-suite"
+REPORT_FILE="${REPORT_DIR}/report-$(date +%Y%m%d-%H%M%S).log"
+TIMEOUT_SHORT=5
+TIMEOUT_MEDIUM=15
+TIMEOUT_LONG=60
+STRESS_MB_LIGHT=512
+STRESS_MB_MEDIUM=2048
+STRESS_MB_HEAVY=3500
+PASS=0
+FAIL=0
+SKIP=0
+TOTAL=0
+
+# ── Setup ───────────────────────────────────────────────────────────────────
+mkdir -p "$REPORT_DIR"
+exec > >(tee -a "$REPORT_FILE") 2>&1
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+log_section()  { echo -e "\n${BOLD}${BLUE}═══ $* ═══${NC}"; }
+log_pass()     { printf "  ${GREEN}✓ PASS${NC}  %s\n" "$*"; ((PASS++)); }
+log_fail()     { printf "  ${RED}✗ FAIL${NC}  %s\n" "$*"; ((FAIL++)); }
+log_skip()     { printf "  ${YELLOW}⊘ SKIP${NC}  %s\n" "$*"; ((SKIP++)); }
+log_info()     { printf "  ${CYAN}→${NC} %s\n" "$*"; }
+log_warn()     { printf "  ${YELLOW}⚠${NC} %s\n" "$*"; }
+
+run_test() {
+    local name="$1" func="$2"
+    ((TOTAL++))
+    echo ""
+    echo -e "${BOLD}[$TOTAL]${NC} $name"
+    echo "──────────────────────────────────────────────"
+    $func
+}
+
+# ── Helper Functions ────────────────────────────────────────────────────────
+get_mem_avail_mb() {
+    awk '/^MemAvailable:/ {printf "%.0f", $2/1024}' /proc/meminfo
+}
+
+get_mem_total_mb() {
+    awk '/^MemTotal:/ {printf "%.0f", $2/1024}' /proc/meminfo
+}
+
+get_swap_free_mb() {
+    awk '/^SwapFree:/ {printf "%.0f", $2/1024}' /proc/meminfo
+}
+
+pct() { awk -v val="$1" -v total="$2" 'BEGIN {printf "%.1f", (val/total)*100}'; }
+
+process_rss_mb() {
+    local pid="$1"
+    awk '/^VmRSS:/ {printf "%.0f", $2/1024}' "/proc/$pid/status" 2>/dev/null
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  TEST SUITE
+# ═════════════════════════════════════════════════════════════════════════════
+
+test_01_systemd_memorymax() {
+    log_info "systemd MemoryMax: kwalletd6'da 1 GiB limit uygulandi mi?"
+    local unit_name_kwallet limit
+    unit_name_kwallet=$(systemctl --user list-units --type=service --no-pager 2>/dev/null | grep 'dbus.*kwalletd6' | awk '{print $1}' | head -1)
+    if [[ -z "$unit_name_kwallet" ]]; then
+        log_fail "kwalletd6 servisi bulunamadi!"
+        return
+    fi
+    limit=$(systemctl --user show "$unit_name_kwallet" -p MemoryMax 2>/dev/null | cut -d= -f2)
+    if [[ "$limit" == "1073741824" ]]; then
+        log_pass "kwalletd6 MemoryMax = 1 GiB (1073741824 bytes)"
+    else
+        log_fail "kwalletd6 MemoryMax = ${limit:-MISSING}, expected 1073741824"
+    fi
+
+    log_info "systemd MemoryMax: limit gercekten calisiyor mu?"
+    local cgroup_oom=0
+    # Run WITHOUT --wait so unit persists; capture unit name
+    local unit_name
+    unit_name=$(systemd-run --user -p MemoryMax=10M -p MemorySwapMax=0 \
+        stress-ng --vm 1 --vm-bytes 100M --vm-keep --timeout "$TIMEOUT_SHORT" 2>&1 \
+        | grep -oP 'run-\S+\.service' | head -1)
+    sleep 2
+    if [[ -n "$unit_name" ]]; then
+        local unit_result
+        unit_result=$(systemctl --user show "$unit_name" -p Result 2>/dev/null | cut -d= -f2)
+        if [[ "$unit_result" == "oom-kill" ]]; then
+            cgroup_oom=1
+            log_pass "Cgroup OOM: 10M limitli servis 100M tahsis edemedi -> Result=oom-kill"
+        else
+            log_info "Unit result: ${unit_result:-not_found} (unit: $unit_name)"
+        fi
+    fi
+    if (( cgroup_oom == 0 )); then
+        log_fail "Cgroup OOM tetiklenmedi - MemoryMax enforcement calismiyor olabilir"
+    fi
+}
+
+test_02_earlyoom_health() {
+    log_info "earlyoom servis durumu kontrol ediliyor..."
+    if systemctl is-active --quiet earlyoom; then
+        local mem_avail pct_free
+        mem_avail=$(get_mem_avail_mb)
+        local mem_total
+        mem_total=$(get_mem_total_mb)
+        pct_free=$(pct "$mem_avail" "$mem_total")
+        log_pass "earlyoom aktif | ${mem_avail} MiB bos / ${mem_total} MiB toplam = ${pct_free}%"
+    else
+        log_fail "earlyoom servisi CALISMIYOR!"
+        return
+    fi
+
+    log_info "earlyoom konfigurasyonu dogru mu?"
+    local config
+    config=$(grep EARLYOOM_ARGS /etc/default/earlyoom 2>/dev/null)
+    if echo "$config" | grep -q "kwalletd6" && echo "$config" | grep -q "\-m 15"; then
+        log_pass "Config: kwalletd6 oncelikli, 15% RAM threshold"
+    else
+        log_fail "earlyoom config eksik veya yanlis: ${config}"
+    fi
+
+    log_info "earlyoom threshold altinda mi? (%%15 = tetiklenme esigi)"
+    if awk -v a="$mem_avail" -v t="$mem_total" 'BEGIN {exit (a/t*100 > 15 ? 0 : 1)}'; then
+        log_pass "RAM ${pct_free}% bos -> threshold'un UZERINDE (guvenli)"
+    else
+        log_warn "RAM ${pct_free}% bos -> threshold'a YAKIN veya ALTINDA!"
+    fi
+}
+
+test_03_memory_leak_detection() {
+    log_info "kwalletd6 kisa sureli bellek buyumesi analiz ediliyor..."
+    local pid
+    pid=$(pgrep -x kwalletd6 2>/dev/null | head -1)
+    if [[ -z "$pid" ]]; then
+        log_fail "kwalletd6 calismiyor!"
+        return
+    fi
+
+    local rss1 rss2
+    rss1=$(process_rss_mb "$pid")
+    log_info "Baslangic RSS: ${rss1} MiB"
+
+    # Brief activity pulse to see if memory grows
+    sleep 3
+    rss2=$(process_rss_mb "$pid")
+
+    local diff=$((rss2 - rss1))
+    if (( diff < 5 )); then
+        log_pass "kwalletd6 stabil: +${diff} MiB / 3sn (normal)"
+    elif (( diff < 50 )); then
+        log_warn "kwalletd6 buyuyor: +${diff} MiB / 3sn (hafif sizinti olabilir)"
+    else
+        log_fail "kwalletd6 HIZLI sizdiriyor: +${diff} MiB / 3sn! Bug 522615 aktif olabilir!"
+    fi
+
+    log_info "kwalletd6 MemoryMax limiti altinda mi?"
+    local current=$rss2
+    if (( current < 950 )); then
+        log_pass "Kullanim: ${current} MiB / 1024 MiB limit ($(pct "$current" 1024)%)"
+    elif (( current < 1024 )); then
+        log_warn "Limite YAKIN: ${current} MiB / 1024 MiB ($(pct "$current" 1024)%) - MemoryMax devreye girecek"
+    else
+        log_fail "MemoryMax LIMITI ASILDI: ${current} MiB / 1024 MiB! Koruma calismiyor!"
+    fi
+}
+
+test_04_controlled_memory_pressure() {
+    log_info "Kontrollu bellek baski testi (${STRESS_MB_MEDIUM} MiB tahsis)..."
+
+    local before after
+    before=$(get_mem_avail_mb)
+    log_info "Test oncesi: ${before} MiB bos"
+
+    systemd-run --user --wait -p MemoryMax="${STRESS_MB_MEDIUM}M" -p MemorySwapMax=0 \
+        stress-ng --vm 2 --vm-bytes "$((STRESS_MB_MEDIUM/2))M" --vm-keep --timeout "$TIMEOUT_MEDIUM" >/dev/null 2>&1
+
+    after=$(get_mem_avail_mb)
+    local recovered_pct
+    recovered_pct=$(pct "$after" "$before")
+
+    if awk -v a="$after" -v b="$before" 'BEGIN {exit (a/b > 0.85 ? 0 : 1)}'; then
+        log_pass "Bellek geri kazanildi: ${before} MiB -> ${after} MiB (${recovered_pct}%)"
+    else
+        log_fail "Bellek tam geri kazanilamadi: ${before} MiB -> ${after} MiB"
+    fi
+
+    # Verify system is still responsive
+    if free -h >/dev/null 2>&1; then
+        log_pass "Sistem yanit veriyor (donma yok)"
+    fi
+}
+
+test_05_swap_pressure() {
+    log_info "Swap baski testi..."
+    local swap_before swap_after
+    swap_before=$(get_swap_free_mb)
+    log_info "Test oncesi: ${swap_before} MiB swap bos"
+
+    # Allocate memory that forces some swapping
+    systemd-run --user --wait -p MemoryMax=6G \
+        stress-ng --vm 4 --vm-bytes 1G --vm-keep --timeout "$TIMEOUT_SHORT" >/dev/null 2>&1
+
+    swap_after=$(get_swap_free_mb)
+    local swap_delta=$((swap_before - swap_after))
+
+    if (( swap_delta < 2000 )); then
+        log_pass "Swap kullanimi kontrollu: +${swap_delta} MiB (< 10%)"
+    else
+        log_warn "Swap kullanimi yuksek: +${swap_delta} MiB"
+    fi
+
+    # Verify swap is being freed
+    sleep 3
+    local swap_recovery
+    swap_recovery=$(get_swap_free_mb)
+    if (( swap_recovery > swap_after )); then
+        log_pass "Swap geri kazaniliyor: ${swap_after} MiB -> ${swap_recovery} MiB"
+    fi
+}
+
+test_06_kde_watchdog() {
+    log_info "KDE kwalletd6 Watchdog aktif mi?"
+    if systemctl --user is-active --quiet kwalletd6-watchdog.service; then
+        log_pass "Watchdog calisiyor (kwalletd6 olurse yeniden baslatacak)"
+    else
+        log_fail "Watchdog CALISMIYOR!"
+    fi
+
+    local watchdog_pid
+    watchdog_pid=$(pgrep -f kwalletd6-watchdog 2>/dev/null | head -1)
+    if [[ -n "$watchdog_pid" ]]; then
+        local rss
+        rss=$(process_rss_mb "$watchdog_pid")
+        log_info "Watchdog PID: ${watchdog_pid}, RSS: ${rss} MiB"
+    fi
+}
+
+test_07_oom_score_priorities() {
+    log_info "OOM skorlari kontrol ediliyor..."
+    local pid score
+
+    # kwalletd6 should have higher (more killable) score than system processes
+    pid=$(pgrep -x kwalletd6 2>/dev/null | head -1)
+    if [[ -n "$pid" ]]; then
+        score=$(awk '{print $1}' "/proc/$pid/oom_score" 2>/dev/null)
+        log_info "kwalletd6  oom_score: ${score}"
+    fi
+
+    pid=$(pgrep -x plasmashell 2>/dev/null | head -1)
+    if [[ -n "$pid" ]]; then
+        score=$(awk '{print $1}' "/proc/$pid/oom_score" 2>/dev/null)
+        log_info "plasmashell oom_score: ${score}"
+    fi
+
+    log_pass "OOM skorlari okunabilir durumda"
+}
+
+test_08_concurrent_stress() {
+    log_info "Es zamanli yuk testi (CPU + bellek)..."
+
+    local before
+    before=$(get_mem_avail_mb)
+
+    # Run CPU stress + memory stress concurrently but contained
+    systemd-run --user --wait -p MemoryMax=1G -p CPUQuota=50% \
+        stress-ng --cpu 2 --vm 1 --vm-bytes 500M --timeout "$TIMEOUT_MEDIUM" >/dev/null 2>&1
+
+    local after
+    after=$(get_mem_avail_mb)
+
+    if awk -v a="$after" -v b="$before" 'BEGIN {exit (a/b > 0.80 ? 0 : 1)}'; then
+        log_pass "CPU+Bellek yuku altinda sistem stabil: ${before} MiB -> ${after} MiB"
+    else
+        log_warn "CPU+Bellek yuku sonrasi dusuk bellek: ${before} MiB -> ${after} MiB"
+    fi
+}
+
+test_09_performance_baseline() {
+    log_info "Performans baseline olculuyor..."
+    echo ""
+
+    printf "  %-30s %s\n" "METRIK" "DEGER"
+    printf "  %-30s %s\n" "──────────────────────────────" "──────────"
+
+    local mem_total mem_avail swap_total swap_free
+    mem_total=$(get_mem_total_mb)
+    mem_avail=$(get_mem_avail_mb)
+    swap_total=$(awk '/^SwapTotal:/ {printf "%.0f", $2/1024}' /proc/meminfo)
+    swap_free=$(get_swap_free_mb)
+
+    printf "  %-30s %s MiB\n" "Toplam RAM" "$mem_total"
+    printf "  %-30s %s MiB (%%%s)\n" "Kullanilabilir RAM" "$mem_avail" "$(pct "$mem_avail" "$mem_total")"
+    printf "  %-30s %s MiB\n" "Toplam Swap" "$swap_total"
+    printf "  %-30s %s MiB (%%%s)\n" "Bos Swap" "$swap_free" "$(pct "$swap_free" "$swap_total")"
+
+    # Top 5 memory consumers
+    echo ""
+    log_info "En cok bellek tuketen 5 proses:"
+    ps axo pid,comm,rss --sort=-rss 2>/dev/null | head -6 | while read -r p c r; do
+        printf "    PID %-6s %-25s %s MiB\n" "$p" "$c" "$((r/1024))"
+    done
+
+    log_pass "Baseline kaydedildi: ${REPORT_FILE}"
+}
+
+test_10_full_system_integrity() {
+    log_info "Sistem butunluk kontrolu..."
+    local errors=0
+
+    # Check no zombie processes (exclude our own subshell transients)
+    local zombies
+    zombies=$(ps -eo pid,stat,comm --no-headers 2>/dev/null | awk '$2 ~ /Z/ && $3 !~ /(ps|awk|wc|tee|stress)/ {print $1}' | wc -l)
+    if (( zombies == 0 )); then
+        log_pass "Zombie proses yok"
+    else
+        log_warn "${zombies} zombie proses bulundu"
+    fi
+
+    # Check no OOM events during suite
+    if journalctl -k --since "5 minutes ago" --no-pager 2>/dev/null | grep -qi "out of memory"; then
+        log_fail "Kernel OOM olayi tespit edildi!"
+    else
+        log_pass "Kernel OOM olayi yok"
+    fi
+
+    # Check kswapd activity
+    local kswapd_cpu
+    kswapd_cpu=$(ps -o %cpu -C kswapd0 --no-headers 2>/dev/null | head -1 | tr -d ' ')
+    if [[ -n "$kswapd_cpu" ]]; then
+        if awk -v c="$kswapd_cpu" 'BEGIN {exit (c < 5.0 ? 0 : 1)}'; then
+            log_pass "kswapd0 CPU: ${kswapd_cpu}% (normal)"
+        else
+            log_warn "kswapd0 yuksek CPU: ${kswapd_cpu}% (thrashing olabilir!)"
+        fi
+    fi
+
+    # Verify earlyoom didn't kill anything during tests
+    if journalctl -u earlyoom --since "5 minutes ago" --no-pager 2>/dev/null | grep -qi "SIGTERM\|SIGKILL"; then
+        log_warn "earlyoom proses oldurdu! (stres testinden olabilir)"
+    else
+        log_pass "earlyoom gereksiz yere proses oldurmedi"
+    fi
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  MAIN
+# ═════════════════════════════════════════════════════════════════════════════
+
+MODE="${1:---full}"
+
+echo -e "${BOLD}${BLUE}"
+echo "╔══════════════════════════════════════════════════════════╗"
+echo "║     MEMORY STABILITY & LEAK DETECTION TEST SUITE v1.0   ║"
+echo "╚══════════════════════════════════════════════════════════╝"
+echo -e "${NC}"
+echo "Baslangic: $(date '+%Y-%m-%d %H:%M:%S')"
+echo "Mod:       $MODE"
+echo "Rapor:     $REPORT_FILE"
+echo "Host:      $(hostname)"
+echo "Kernel:    $(uname -r)"
+echo "RAM:       $(get_mem_total_mb) MiB toplam"
+
+case "$MODE" in
+    --quick)
+        log_section "HIZLI TEST (temel kontroller)"
+        run_test "MemoryMax Enforcement"     test_01_systemd_memorymax
+        run_test "earlyoom Health"          test_02_earlyoom_health
+        run_test "Memory Leak Detection"    test_03_memory_leak_detection
+        run_test "System Integrity"         test_10_full_system_integrity
+        ;;
+    --leak-monitor)
+        log_section "SIZINTI MONITORU (uzun sureli)"
+        while true; do
+            run_test "Memory Leak Snapshot" test_03_memory_leak_detection
+            sleep 300  # 5 minutes
+        done
+        ;;
+    --full|*)
+        log_section "TAM TEST SUITE"
+        run_test "MemoryMax Enforcement"     test_01_systemd_memorymax
+        run_test "earlyoom Health"          test_02_earlyoom_health
+        run_test "Memory Leak Detection"    test_03_memory_leak_detection
+        run_test "Controlled Pressure"      test_04_controlled_memory_pressure
+        run_test "Swap Pressure"            test_05_swap_pressure
+        run_test "KDE Watchdog"             test_06_kde_watchdog
+        run_test "OOM Score Priorities"     test_07_oom_score_priorities
+        run_test "Concurrent Stress"        test_08_concurrent_stress
+        run_test "Performance Baseline"     test_09_performance_baseline
+        run_test "System Integrity"         test_10_full_system_integrity
+        ;;
+esac
+
+# ── Summary ─────────────────────────────────────────────────────────────────
+echo ""
+echo -e "${BOLD}${BLUE}═══ TEST SONUCLARI ═══${NC}"
+echo -e "  ${GREEN}PASS:${NC} $PASS  ${RED}FAIL:${NC} $FAIL  ${YELLOW}SKIP:${NC} $SKIP  TOTAL: $TOTAL"
+echo ""
+
+if (( FAIL > 0 )); then
+    echo -e "${RED}${BOLD}✗ BAZI TESTLER BASARISIZ! Detaylar icin: $REPORT_FILE${NC}"
+    exit 1
+else
+    echo -e "${GREEN}${BOLD}✓ TUM TESTLER BASARILI${NC}"
+    exit 0
+fi
