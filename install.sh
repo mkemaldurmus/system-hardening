@@ -48,7 +48,7 @@ fi
 ok "memory-suite installed to ~/.local/bin/"
 
 # ── Step 6: CPU Performance Optimizations ──────────────────────────────────
-step "Step 6/6: Applying CPU performance optimizations..."
+step "Step 6/7: Applying CPU performance optimizations..."
 
 # 6a: Sysctl tweaks (I/O, network, scheduler)
 sudo cp "$REPO_DIR/configs/sysctl/99-ryzen-perf.conf" /etc/sysctl.d/
@@ -64,7 +64,12 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now thermald
 ok "thermald configured for AMD with RAPL thermal management"
 
-# 6c: Kernel mitigations=off (requires reboot)
+# 6c: KSM memory deduplication
+sudo cp "$REPO_DIR/configs/ksm/ksm.conf" /etc/tmpfiles.d/
+echo 1 | sudo tee /sys/kernel/mm/ksm/run >/dev/null 2>&1 || true
+ok "KSM memory deduplication enabled (Chrome/Java benefit)"
+
+# 6d: Kernel mitigations=off (requires reboot)
 if ! grep -q "mitigations=off" /etc/default/limine 2>/dev/null; then
     echo ""
     echo "  ⚠ To disable CPU mitigations (5-15% performance gain), add to kernel cmdline:"
@@ -74,7 +79,7 @@ fi
 ok "CPU optimizations complete (mitigations=off requires manual reboot)"
 
 # ── Step 5: Install test dependencies (stress-ng, glmark2) ─────────────
-step "Step 5/6: Installing test dependencies..."
+step "Step 5/7: Installing test dependencies..."
 for pkg in stress-ng glmark2; do
     if command -v "$pkg" &>/dev/null; then
         ok "$pkg already installed"
@@ -94,13 +99,15 @@ echo "  2. kwalletd6    — capped at 1 GiB via systemd MemoryMax"
 echo "  3. Watchdog     — KDE auto-restarts kwalletd6 after kill"
 echo "  4. Sysctl       — I/O, network, scheduler performance tweaks"
 echo "  5. thermald     — AMD RAPL-based adaptive thermal management"
-echo "  6. memory-suite — full stability suite (~/.local/bin/memory-suite)"
+echo "  6. KSM          — Kernel Same-page Merging memory deduplication"
+echo "  7. memory-suite — full stability suite (~/.local/bin/memory-suite)"
 echo ""
 echo "Test modes:"
 echo "  memory-suite --quick      Basic health (30s)"
 echo "  memory-suite --cpu        CPU stress & thermal (2min)"
 echo "  memory-suite --gpu        GPU/OpenGL stress (2min)"
 echo "  memory-suite --full       Memory only (2min)"
-echo "  memory-suite --burnin     Full system: Memory+CPU+GPU (6min)"
+echo "  memory-suite --mem-advanced  Deep memory analysis"
+echo "  memory-suite --burnin     Full system: Memory+CPU+GPU (8min)"
 echo "  memory-suite --leak-monitor  Continuous leak watch"
 echo ""
