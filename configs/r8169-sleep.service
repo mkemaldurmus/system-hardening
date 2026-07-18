@@ -1,0 +1,13 @@
+[Unit]
+Description=Remove r8169 module before suspend, reload after resume
+Before=sleep.target
+StopWhenUnneeded=yes
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=-/usr/bin/rmmod r8169
+ExecStop=-/usr/bin/modprobe r8169
+
+[Install]
+WantedBy=sleep.target

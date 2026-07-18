@@ -1,0 +1,1 @@
+EARLYOOM_ARGS="-m 8 -s 8 -r 3600 --avoid (^|/)(init|systemd|Xorg|ssh|login)$ --prefer (^|/)(chrome|java|kwalletd6|firefox|gradle)$ -n"
