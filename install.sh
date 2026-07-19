@@ -97,6 +97,28 @@ for pkg in stress-ng glmark2; do
     fi
 done
 
+# ── Step 8: Remote Access (SSH + Tailscale) — OPT-IN ───────────────────────
+# Disabled by default to avoid SSH lock-out. Enable with: ENABLE_REMOTE_SSH=1
+step "Step 8: Remote access (phone -> PC via hardened SSH + Tailscale)..."
+if [ "${ENABLE_REMOTE_SSH:-0}" = "1" ]; then
+    sudo pacman -S --noconfirm openssh tailscale || err "Failed to install openssh/tailscale"
+    sudo mkdir -p /etc/ssh/sshd_config.d
+    sudo cp "$REPO_DIR/configs/ssh/99-hardening.conf" /etc/ssh/sshd_config.d/
+    sudo systemctl enable --now sshd
+    sudo systemctl enable --now tailscaled
+    ok "sshd hardened (key-only, root login off) + tailscale installed"
+
+    if [ ! -s "${HOME}/.ssh/authorized_keys" ]; then
+        echo -e "  ${RED}!!${NC} ~/.ssh/authorized_keys is EMPTY — remote SSH login will fail."
+        echo "     Add your phone's public key FIRST:"
+        echo "       echo 'ssh-ed25519 AAAA... phone' >> ~/.ssh/authorized_keys"
+    fi
+    echo "     Bring Tailscale up:  sudo tailscale up   (then: tailscale ip -4)"
+    echo "     Full guide:          docs/remote-access.md"
+else
+    ok "Remote SSH access skipped (run with ENABLE_REMOTE_SSH=1 to enable)"
+fi
+
 # ── Verify ──────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${GREEN}═══ Hardening Complete ═══${NC}"

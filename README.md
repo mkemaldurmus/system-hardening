@@ -73,14 +73,34 @@ system-hardening/
 │   ├── sysctl/99-ryzen-perf.conf           # → /etc/sysctl.d/
 │   ├── thermald/thermal-conf.xml           # → /etc/thermald/
 │   ├── thermald/amd-override.conf          # → /etc/systemd/system/thermald.service.d/
-│   └── ksm/ksm.conf                        # → /etc/tmpfiles.d/
+│   ├── ksm/ksm.conf                        # → /etc/tmpfiles.d/
+│   └── ssh/99-hardening.conf               # → /etc/ssh/sshd_config.d/ (opt-in)
 ├── systemd/
 │   └── kwalletd6-memory-limit.conf         # → ~/.config/systemd/user/
 ├── scripts/
 │   └── memory-suite                        # → ~/.local/bin/memory-suite
 └── docs/
-    └── test-report-2026-07-15.txt          # Initial validation results
+    ├── test-report-2026-07-15.txt          # Initial validation results
+    └── remote-access.md                    # Phone → PC via SSH + Tailscale
 ```
+
+## Remote Access (phone → PC)
+
+Reach this machine securely from your phone — key-only SSH over a Tailscale
+(WireGuard) mesh, with **no port exposed to the public internet**.
+
+```bash
+# Opt-in (disabled by default to avoid SSH lock-out)
+ENABLE_REMOTE_SSH=1 bash install.sh
+```
+
+- **sshd hardening:** password + root login disabled, pubkey-only, `MaxAuthTries 3`
+- **Tailscale:** stable `100.x.x.x` IP behind NAT/CGNAT, end-to-end encrypted
+- **Clients:** Termux/Termius (Android), Termius/Blink (iOS); KDE RDP or RustDesk for GUI
+
+> ⚠ Add your phone's public key to `~/.ssh/authorized_keys` **before** relying on it.
+
+Full step-by-step guide (Türkçe): [`docs/remote-access.md`](docs/remote-access.md)
 
 ## Deployment
 
